@@ -101,7 +101,10 @@ PI_MODE=json
 PI_RUNNER=sdk
 PI_SESSION_DIR=./data/pi-sessions
 PI_PROGRESS_DEBOUNCE_MS=3000
-PI_TIMEOUT_MS=1800000
+PI_STATUS_UPDATE_MS=60000
+PI_RAPID_UPDATE_WINDOW_MS=180000
+PI_SLOW_STATUS_UPDATE_MS=300000
+PI_TIMEOUT_MS=5400000
 
 HOST=127.0.0.1
 PORT=8787
@@ -117,6 +120,10 @@ Important values:
 - `INSTALL_SECRET` — random secret for `/linear/install`; use at least 16 characters
 - `PI_WORKDIR` — the repository pi should work in
 - `PI_SESSION_DIR` — persisted pi SDK session state
+- `PI_STATUS_UPDATE_MS` — rapid progress cadence while the run is new
+- `PI_RAPID_UPDATE_WINDOW_MS` — how long to keep rapid progress updates active
+- `PI_SLOW_STATUS_UPDATE_MS` — scheduled status cadence after the rapid window
+- `PI_TIMEOUT_MS` — hard pi run timeout; keep this above expected long-running agent duration
 - `TOKEN_STORE_PATH` / `STATE_STORE_PATH` — persisted Linear OAuth state
 
 Use absolute paths for token, state, and session storage in production.

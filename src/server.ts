@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import express, { type Request, type Response } from "express";
 import { config, publicConfig } from "./config.js";
 import { completeOAuthInstall, consumeOAuthState, createInstallUrl } from "./oauth.js";
+import { handleAssignedIssueWebhook, isIssueRelatedWebhook } from "./issue-webhook-runner.js";
 import { handleAgentSessionWebhook } from "./session-runner.js";
 import { isFreshWebhookTimestamp, verifyLinearSignature } from "./signature.js";
 
@@ -9,9 +10,12 @@ type LinearWebhookPayload = {
   type?: string;
   action?: string;
   webhookTimestamp?: number;
+  data?: unknown;
+  updatedFrom?: Record<string, unknown>;
   agentSession?: {
     id?: string;
     issue?: {
+      id?: string;
       identifier?: string;
       title?: string;
       url?: string;
@@ -44,6 +48,16 @@ function handleAgentSessionEvent(payload: LinearWebhookPayload) {
   void handleAgentSessionWebhook(payload).catch((error: Error) => {
     console.error("failed to handle agent session webhook", { message: error.message });
   });
+}
+
+function handleIssueRelatedEvent(payload: LinearWebhookPayload) {
+  void handleAssignedIssueWebhook(payload).catch((error: Error) => {
+    console.error("failed to handle assigned issue webhook", { message: error.message });
+  });
+}
+
+function acceptsWebhook(payload: LinearWebhookPayload): boolean {
+  return payload.type === "AgentSessionEvent" || isIssueRelatedWebhook(payload);
 }
 
 function installSecretFromRequest(req: Request): string | undefined {
@@ -142,11 +156,14 @@ export function createApp() {
       }
 
       logWebhook(payload);
+      const accepted = acceptsWebhook(payload);
       if (payload.type === "AgentSessionEvent") {
         handleAgentSessionEvent(payload);
+      } else if (isIssueRelatedWebhook(payload)) {
+        handleIssueRelatedEvent(payload);
       }
 
-      return res.status(200).json({ ok: true, accepted: payload.type === "AgentSessionEvent" });
+      return res.status(200).json({ ok: true, accepted });
     },
   );
 

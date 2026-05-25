@@ -1,3 +1,4 @@
+import { registerAgentIssue } from "./agent-issues.js";
 import { createAgentActivity } from "./linear.js";
 import { abortPiSession, buildPiFollowUpPrompt, queuePiFollowUp, runPi } from "./pi-runner.js";
 
@@ -19,6 +20,7 @@ export type AgentSessionWebhook = {
     id?: string;
     promptContext?: string;
     issue?: {
+      id?: string;
       identifier?: string;
       title?: string;
       url?: string;
@@ -52,6 +54,8 @@ export async function handleAgentSessionWebhook(payload: AgentSessionWebhook): P
     console.warn("agent session webhook missing agentSession.id");
     return;
   }
+
+  registerAgentIssue(payload.agentSession?.issue);
 
   const state = sessions.get(agentSessionId) ?? { running: false };
   sessions.set(agentSessionId, state);
@@ -106,6 +110,11 @@ function startRun(agentSessionId: string, payload: AgentSessionWebhook, state: S
 
   state.running = true;
   state.lastStartedAt = Date.now();
+
+  void createAgentActivity(agentSessionId, {
+    type: "thought",
+    body: "Pi has started working on this.",
+  }).catch((error: Error) => console.error("failed to create started activity", { message: error.message }));
 
   void runSession(agentSessionId, payload, state).catch(async (error: Error) => {
     state.running = false;

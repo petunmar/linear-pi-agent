@@ -154,6 +154,67 @@ export async function getLinearViewer(): Promise<{ id: string; name?: string }> 
   return data.viewer;
 }
 
+export async function getInstalledAppUserId(): Promise<string> {
+  const { appUserId } = await selectInstallation();
+  return appUserId;
+}
+
+export async function getIssueForWebhook(issueId: string): Promise<{
+  id: string;
+  identifier?: string;
+  title?: string;
+  url?: string;
+  description?: string | null;
+  assignee?: { id?: string; name?: string } | null;
+}> {
+  const data = await linearGraphql<{
+    issue: {
+      id: string;
+      identifier?: string;
+      title?: string;
+      url?: string;
+      description?: string | null;
+      assignee?: { id?: string; name?: string } | null;
+    };
+  }>(
+    `query IssueForWebhook($id: String!) {
+      issue(id: $id) {
+        id
+        identifier
+        title
+        url
+        description
+        assignee { id name }
+      }
+    }`,
+    { id: issueId },
+  );
+  return data.issue;
+}
+
+export async function createIssueComment(issueId: string, body: string): Promise<{ id: string }> {
+  const data = await linearGraphql<{ commentCreate: { success: boolean; comment: { id: string } } }>(
+    `mutation CommentCreate($input: CommentCreateInput!) {
+      commentCreate(input: $input) {
+        success
+        comment { id }
+      }
+    }`,
+    {
+      input: {
+        issueId,
+        body,
+      },
+    },
+  );
+
+  if (!data.commentCreate.success) {
+    throw new Error("Linear commentCreate returned success=false");
+  }
+
+  return { id: data.commentCreate.comment.id };
+}
+
 export async function createAgentActivity(
   agentSessionId: string,
   content: AgentActivityContent,

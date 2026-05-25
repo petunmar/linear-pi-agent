@@ -13,6 +13,23 @@ import type { AgentSessionWebhook } from "./session-runner.js";
 const MAX_LINEAR_BODY_CHARS = 8_000;
 const MAX_PROGRESS_CHARS = 220;
 
+const LINEAR_AGENT_WORKFLOW_PROMPT = [
+  "Linear agent workflow requirements:",
+  "- Always work in a separate git worktree for the task, not in the main checkout.",
+  "- Always work on a feature branch, never directly on main/master.",
+  "- If you are not already in a suitable worktree and branch, create them before editing files.",
+  "- Commit your completed changes.",
+  "- When the work is done, push the branch and create a GitHub pull request.",
+  "- Prefer the GitHub extension commands/tools when available; otherwise use gh/git directly.",
+  "- If a PR cannot be created, clearly report the exact blocker and leave the local branch and commit ready.",
+  "- Do not stop, kill, restart, or modify the Linear pi agent service, Caddy, systemd user services, or any process listening for Linear webhooks.",
+  "- Do not kill arbitrary processes by port (for example, never run kill $(lsof -ti :PORT), fuser -k, pkill by generic server names, or broad docker cleanup).",
+  "- Local app/test ports are fixed for infrastructure reasons. If a fixed dev/test port is occupied, first identify the owner with ss/lsof/docker ps/ps before acting.",
+  "- You may clean up stale resources only when they are clearly owned by the same repository/worktree test harness, such as fenra-e2e-* Docker containers, child process trees whose cwd is the current worktree, or PIDs recorded by the harness. Prefer graceful termination first, then verify the port is free.",
+  "- If the port owner is the Linear pi agent, Caddy, a systemd user service, a webhook listener, an unrelated worktree, or cannot be confidently identified as stale test infrastructure from your current worktree/repo, do not kill it; report the exact blocker.",
+  "- Before rerunning tests after a port conflict, either reuse/clean only your own stale test resources or report the blocker; do not switch ports unless the repository/test command explicitly supports it.", 
+].join("\n");
+
 export type PiRunResult = {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -30,6 +47,7 @@ type ManagedSession = {
 };
 
 const sdkSessions = new Map<string, ManagedSession>();
+let loggedExtensionDiscovery = false;
 
 function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -83,6 +101,53 @@ function summarizeToolArgs(toolName: string, args: unknown): string {
   return toolName;
 }
 
+function commandText(args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const command = (args as Record<string, unknown>).command;
+  return typeof command === "string" ? command.toLowerCase() : "";
+}
+
+type StatusCategory = "reading" | "editing" | "testing" | "git" | "research" | "installing" | "shell";
+
+function statusCategory(toolName: string, args: unknown): StatusCategory {
+  const lowerTool = toolName.toLowerCase();
+  const command = commandText(args);
+
+  if (["read", "grep", "find", "ls"].includes(lowerTool)) return "reading";
+  if (["edit", "write"].includes(lowerTool)) return "editing";
+  if (["search", "web_fetch", "youtube_search", "video_extract"].includes(lowerTool)) return "research";
+  if (command.match(/\b(npm|pnpm|yarn|bun)\s+(install|i|ci)\b/) || command.includes("apt ") || command.includes("brew ")) {
+    return "installing";
+  }
+  if (command.match(/\b(test|eslint|tsc|vue-tsc|playwright|stagehand|cypress|vitest|jest|mocha|pytest)\b/)) {
+    return "testing";
+  }
+  if (command.match(/\b(git|gh)\b/) || command.includes("pull request") || command.includes(" pr ")) return "git";
+  if (lowerTool === "bash") return "shell";
+  return "reading";
+}
+
+const STATUS_PHRASES: Record<StatusCategory, string> = {
+  reading: "inspecting the codebase",
+  editing: "making code changes",
+  testing: "running checks or tests",
+  git: "preparing branch or PR work",
+  research: "looking up supporting context",
+  installing: "preparing dependencies",
+  shell: "checking the local environment",
+};
+
+function summarizeStatus(categories: Map<StatusCategory, number>): string | undefined {
+  const ranked = [...categories.entries()]
+    .sort((first, second) => second[1] - first[1])
+    .slice(0, 2)
+    .map(([category]) => STATUS_PHRASES[category]);
+
+  if (!ranked.length) return undefined;
+  if (ranked.length === 1) return `Still working — Pi is ${ranked[0]}.`;
+  return `Still working — Pi is ${ranked[0]} and ${ranked[1]}.`;
+}
+
 function guidanceText(payload: AgentSessionWebhook): string {
   const rules = payload.guidance?.flatMap((rule) => rule.body ? [rule.body] : []) ?? [];
   if (!rules.length) return "";
@@ -97,8 +162,10 @@ export function buildPiPrompt(payload: AgentSessionWebhook): string {
     "You are running as Pi, a Linear custom agent powered by pi.",
     "Work directly in this repository with full control. Make code changes when appropriate.",
     "Do not expose secrets. Be concise in your final summary for Linear.",
+    LINEAR_AGENT_WORKFLOW_PROMPT,
     "",
     issue ? "Linear issue:" : "Linear session:",
+    issue?.id ? `- Linear issue ID: ${issue.id}` : undefined,
     issue?.identifier ? `- Identifier: ${issue.identifier}` : undefined,
     issue?.title ? `- Title: ${issue.title}` : undefined,
     issue?.url ? `- URL: ${issue.url}` : undefined,
@@ -117,6 +184,7 @@ export function buildPiFollowUpPrompt(payload: AgentSessionWebhook): string {
       "Linear user follow-up:",
       followUp,
       "",
+      LINEAR_AGENT_WORKFLOW_PROMPT,
       "Continue from the existing session context. Be concise in your final summary for Linear.",
     ].join("\n");
   }
@@ -127,11 +195,16 @@ export function buildPiFollowUpPrompt(payload: AgentSessionWebhook): string {
       "Linear follow-up context:",
       promptContext,
       "",
+      LINEAR_AGENT_WORKFLOW_PROMPT,
       "Continue from the existing session context. Be concise in your final summary for Linear.",
     ].join("\n");
   }
 
-  return "Linear sent a follow-up event without message text. Continue from the existing session context and summarize any useful status.";
+  return [
+    "Linear sent a follow-up event without message text.",
+    LINEAR_AGENT_WORKFLOW_PROMPT,
+    "Continue from the existing session context and summarize any useful status.",
+  ].join("\n\n");
 }
 
 export function summarizePiResult(result: PiRunResult): string {
@@ -151,12 +224,21 @@ export function summarizePiResult(result: PiRunResult): string {
 class ProgressReporter {
   private pending?: { type: "thought" | "action"; body: string; action?: string; parameter?: string };
   private timer?: NodeJS.Timeout;
+  private statusTimer?: NodeJS.Timeout;
+  private statusCategories = new Map<StatusCategory, number>();
   private lastSentAt = 0;
+  private readonly startedAt = Date.now();
 
   constructor(private readonly agentSessionId: string) {}
 
   thought(body: string): void {
     this.queue({ type: "thought", body: truncate(body) });
+  }
+
+  status(toolName: string, args: unknown): void {
+    const category = statusCategory(toolName, args);
+    this.statusCategories.set(category, (this.statusCategories.get(category) ?? 0) + 1);
+    this.ensureStatusTimer();
   }
 
   action(action: string, parameter: string): void {
@@ -174,6 +256,26 @@ class ProgressReporter {
     if (this.timer) return;
     this.timer = setTimeout(() => void this.flush(), wait);
     this.timer.unref();
+  }
+
+  private ensureStatusTimer(): void {
+    if (this.statusTimer) return;
+    this.statusTimer = setTimeout(() => {
+      this.statusTimer = undefined;
+      const summary = summarizeStatus(this.statusCategories);
+      this.statusCategories.clear();
+      if (summary) this.thought(summary);
+      this.ensureStatusTimer();
+    }, this.nextStatusDelayMs());
+    this.statusTimer.unref();
+  }
+
+  private nextStatusDelayMs(): number {
+    const elapsed = Date.now() - this.startedAt;
+    if (elapsed < config.PI_RAPID_UPDATE_WINDOW_MS) {
+      return Math.min(config.PI_STATUS_UPDATE_MS, config.PI_RAPID_UPDATE_WINDOW_MS - elapsed);
+    }
+    return config.PI_SLOW_STATUS_UPDATE_MS;
   }
 
   async flush(): Promise<void> {
@@ -197,6 +299,15 @@ class ProgressReporter {
       console.error("failed to post pi progress", { message: error instanceof Error ? error.message : String(error) });
     }
   }
+
+  dispose(): void {
+    if (this.timer) clearTimeout(this.timer);
+    if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.timer = undefined;
+    this.statusTimer = undefined;
+    this.pending = undefined;
+    this.statusCategories.clear();
+  }
 }
 
 async function getSdkSession(agentSessionId: string, reporter: ProgressReporter): Promise<ManagedSession> {
@@ -210,7 +321,21 @@ async function getSdkSession(agentSessionId: string, reporter: ProgressReporter)
   await mkdir(sessionDir, { recursive: true });
   const sessionFile = path.join(sessionDir, `${agentSessionId}.jsonl`);
   const sessionManager = SessionManager.open(sessionFile, sessionDir, config.PI_WORKDIR);
-  const { session } = await createAgentSession({ cwd: config.PI_WORKDIR, sessionManager });
+  const { session, extensionsResult } = await createAgentSession({
+    cwd: config.PI_WORKDIR,
+    agentDir: config.PI_AGENT_DIR,
+    sessionManager,
+  });
+
+  if (!loggedExtensionDiscovery) {
+    loggedExtensionDiscovery = true;
+    console.log("pi extensions loaded for Linear agent", {
+      agentDir: config.PI_AGENT_DIR,
+      cwd: config.PI_WORKDIR,
+      extensions: extensionsResult.extensions.map((extension) => extension.path),
+      errors: extensionsResult.errors,
+    });
+  }
 
   const reporterRef = { current: reporter };
   const unsubscribe = session.subscribe((event) => handleSdkEvent(event, reporterRef.current));
@@ -234,6 +359,7 @@ function handleSdkEvent(event: AgentSessionEvent, reporter: ProgressReporter): v
     case "agent_start":
       break;
     case "tool_execution_start":
+      reporter.status(event.toolName, event.args);
       break;
     case "message_end":
       // Do not mirror assistant messages as progress thoughts. Linear uses the
@@ -319,6 +445,7 @@ export async function runPi(payload: AgentSessionWebhook): Promise<PiRunResult> 
     return result;
   } finally {
     if (timeout) clearTimeout(timeout);
+    reporter.dispose();
     captureFinal();
   }
 }
