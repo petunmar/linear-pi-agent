@@ -99,7 +99,10 @@ PI_WORKDIR=/path/to/your/app
 PI_COMMAND=pi
 PI_MODE=json
 PI_RUNNER=sdk
-PI_SESSION_DIR=./data/pi-sessions
+# Use a pi/lazyagent-compatible project subdirectory so lazyagent can discover Linear pi SDK sessions.
+# Encode PI_WORKDIR by replacing / with - and wrapping with --, for example:
+# /path/to/your/app -> /home/you/.pi/agent/sessions/--path-to-your-app--
+PI_SESSION_DIR=/home/you/.pi/agent/sessions/--path-to-your-app--
 PI_PROGRESS_DEBOUNCE_MS=3000
 PI_STATUS_UPDATE_MS=60000
 PI_RAPID_UPDATE_WINDOW_MS=180000
@@ -119,7 +122,7 @@ Important values:
 - `LINEAR_WEBHOOK_SECRET` — Linear webhook signing secret
 - `INSTALL_SECRET` — random secret for `/linear/install`; use at least 16 characters
 - `PI_WORKDIR` — the repository pi should work in
-- `PI_SESSION_DIR` — persisted pi SDK session state
+- `PI_SESSION_DIR` — persisted pi SDK session state. For lazyagent discovery, point this at a project subdirectory under `~/.pi/agent/sessions`, e.g. `/home/petur/.pi/agent/sessions/--home-petur-coding-fenra-monorepo--` for `/home/petur/coding/fenra-monorepo`. Use an absolute path in production/systemd env files.
 - `PI_STATUS_UPDATE_MS` — rapid progress cadence while the run is new
 - `PI_RAPID_UPDATE_WINDOW_MS` — how long to keep rapid progress updates active
 - `PI_SLOW_STATUS_UPDATE_MS` — scheduled status cadence after the rapid window
@@ -191,7 +194,7 @@ loginctl enable-linger "$USER"
 - `data/` — local OAuth and pi session state, ignored by git
 - `dist/` — compiled output, ignored by git
 
-Ignored locally: `.env`, `data/*.json`, `data/pi-sessions/`, `dist/`, `node_modules/`, and logs.
+Ignored locally: `.env`, `data/*.json`, legacy `data/pi-sessions/`, `dist/`, `node_modules/`, and logs.
 
 ## Security notes
 
